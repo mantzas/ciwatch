@@ -33,6 +33,24 @@ func TestClassifyAndSortRows(t *testing.T) {
 	}
 }
 
+func TestSortRowsByRepoOrderGroupsConfiguredRepos(t *testing.T) {
+	now := time.Now()
+	rows := []Row{
+		{Kind: RowRun, Repo: "beatlabs/harvester", Workflow: "old", UpdatedAt: now.Add(-time.Hour)},
+		{Kind: RowRun, Repo: "mantzas/ciwatch", Workflow: "new", UpdatedAt: now},
+		{Kind: RowRun, Repo: "beatlabs/patron", Workflow: "patron", UpdatedAt: now.Add(-time.Minute)},
+		{Kind: RowRun, Repo: "beatlabs/harvester", Workflow: "fresh", UpdatedAt: now.Add(-time.Second)},
+	}
+
+	SortRowsByRepoOrder(rows, []string{"mantzas/ciwatch", "beatlabs/patron", "beatlabs/harvester"})
+
+	got := []string{rows[0].Repo, rows[1].Repo, rows[2].Repo, rows[3].Repo + ":" + rows[3].Workflow}
+	want := []string{"mantzas/ciwatch", "beatlabs/patron", "beatlabs/harvester", "beatlabs/harvester:old"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("order = %+v, want %+v", got, want)
+	}
+}
+
 func TestRunnerBaselineETagAndNotifyDedupe(t *testing.T) {
 	cfg := config.Config{Repos: []string{"A/B"}, PollInterval: time.Minute, RunsPerRepo: 5, NotifyMacOS: true}
 	client := &fakeClient{runs: []ghapi.Run{{ID: 1, Attempt: 1, Name: "CI", Status: "completed", Conclusion: "failure", Branch: "main", UpdatedAt: time.Now(), URL: "u"}}}
@@ -128,6 +146,29 @@ func TestRunnerEndToEndRowsCacheErrorsAndNotModified(t *testing.T) {
 	}
 }
 
+func TestRunnerRefetchesColdNotModifiedResponse(t *testing.T) {
+	cfg := config.Config{Repos: []string{"owner/repo"}, PollInterval: time.Minute, RunsPerRepo: 5}
+	cache := state.New()
+	cache.Baseline = true
+	cache.ETags["owner/repo"] = `"cached"`
+	client := &coldNotModifiedClient{run: ghapi.Run{
+		ID: 1, Attempt: 1, Name: "CI", Status: "completed", Conclusion: "success",
+		Branch: "main", UpdatedAt: time.Now(), URL: "https://example.test/run",
+	}}
+	runner := NewRunner(cfg, client, cache, false)
+
+	snapshot, err := runner.Refresh(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Rows) != 1 || snapshot.Rows[0].Status != StatusOK {
+		t.Fatalf("expected refetched row, got %+v", snapshot.Rows)
+	}
+	if strings.Join(client.etags, ",") != `"cached",` {
+		t.Fatalf("etag calls = %+v", client.etags)
+	}
+}
+
 func TestModelRefreshMessageSendsOneNotificationFailureEvent(t *testing.T) {
 	cfg := config.Config{Repos: []string{"a/b"}, PollInterval: time.Minute, RunsPerRepo: 1, NotifyMacOS: true}
 	notifier := &fakeNotifier{notifyErr: errors.New("blocked")}
@@ -176,6 +217,21 @@ func TestModelKeyHandlingOpenAndEventCap(t *testing.T) {
 	}
 	if len(got.events) != 20 {
 		t.Fatalf("event cap failed: %d", len(got.events))
+	}
+}
+
+func TestModelApplyRowsGroupsRepoThread(t *testing.T) {
+	model := NewModel(config.Config{}, &fakeRunner{cache: state.New()}, &fakeNotifier{}, "state.json")
+	model.rows = []Row{
+		{Kind: RowRun, Repo: "mantzas/ciwatch", Workflow: "CodeQL", Status: StatusOK},
+		{Kind: RowRun, Repo: "mantzas/ciwatch", Workflow: "CI", Status: StatusOK},
+		{Kind: RowRun, Repo: "beatlabs/patron", Workflow: "Scheduled", Status: StatusOK},
+	}
+	model.applyRows()
+
+	rows := model.table.Rows()
+	if rows[0][0] != "mantzas/ciwatch" || rows[0][1] != "┌ CodeQL" || rows[1][0] != "" || rows[1][1] != "└ CI" || rows[2][0] != "beatlabs/patron" {
+		t.Fatalf("grouped rows = %+v", rows)
 	}
 }
 
@@ -383,6 +439,19 @@ func (f *repoClient) WorkflowRuns(_ context.Context, repo string, perPage int, e
 	res := f.results[repo]
 	res.Repo = repo
 	return res, nil
+}
+
+type coldNotModifiedClient struct {
+	run   ghapi.Run
+	etags []string
+}
+
+func (f *coldNotModifiedClient) WorkflowRuns(_ context.Context, repo string, _ int, etag string) (ghapi.RunsResult, error) {
+	f.etags = append(f.etags, etag)
+	if etag != "" {
+		return ghapi.RunsResult{Repo: repo, NotModified: true}, nil
+	}
+	return ghapi.RunsResult{Repo: repo, Runs: []ghapi.Run{f.run}, ETag: `"fresh"`}, nil
 }
 
 func assertRow(t *testing.T, rows []Row, repo string, kind RowKind, status Status, notify bool) {

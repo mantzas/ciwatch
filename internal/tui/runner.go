@@ -50,6 +50,9 @@ func (r *GitHubRunner) Refresh(ctx context.Context) (Snapshot, error) {
 			defer wg.Done()
 			key := state.RepoKey(repo)
 			res, err := r.client.WorkflowRuns(ctx, repo, r.cfg.RunsPerRepo, r.cache.ETags[key])
+			if err == nil && res.NotModified && len(r.lastRows[key]) == 0 {
+				res, err = r.client.WorkflowRuns(ctx, repo, r.cfg.RunsPerRepo, "")
+			}
 			ch <- result{repo: repo, res: res, err: err}
 		}()
 	}
@@ -99,7 +102,7 @@ func (r *GitHubRunner) Refresh(ctx context.Context) (Snapshot, error) {
 	r.cache.Baseline = true
 	rate.Projected = projectedUsage(len(r.cfg.Repos), r.cfg.PollInterval)
 	rate.Warning = rate.Projected > 0.70
-	SortRows(rows)
+	SortRowsByRepoOrder(rows, r.cfg.Repos)
 	return Snapshot{Rows: rows, Rate: rate, Events: events}, nil
 }
 
