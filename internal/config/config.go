@@ -41,6 +41,10 @@ type LoadMeta struct {
 	CheckedPaths []string
 }
 
+func CheckedPaths(path string) []string {
+	return lookupPaths(path)
+}
+
 var repoPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 
 func Load(path string) (Config, LoadMeta, error) {

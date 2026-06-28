@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mantzas/ciwatch/internal/tui"
 )
 
 func TestRunVersion(t *testing.T) {
@@ -39,6 +42,47 @@ func TestRunMissingConfigPrintsSample(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "config not found") || !strings.Contains(stderr, `repos = ["owner/repo"]`) {
 		t.Fatalf("stderr missing config help: %q", stderr)
+	}
+}
+
+func TestRunPrintConfigPaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ciwatch.toml")
+	code, stdout, stderr := captureRun(t, []string{"--config", path, "--print-config-paths"})
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if strings.TrimSpace(stdout) != path {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q", stderr)
+	}
+}
+
+func TestRunDoctorReportsConfigFailure(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+	code, stdout, stderr := captureRun(t, []string{"--config", missing, "--doctor"})
+	if code != 1 {
+		t.Fatalf("code = %d, stdout = %q stderr = %q", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "config: FAIL") || !strings.Contains(stdout, "config path: "+missing) {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	if !strings.Contains(stdout, "cache path:") {
+		t.Fatalf("stdout missing cache path: %q", stdout)
+	}
+}
+
+func TestFormatRow(t *testing.T) {
+	got := formatRow(tui.Row{Repo: "a/b", Workflow: "CI", Status: tui.StatusBroken, Branch: "main", Title: "failed"})
+	want := "a/b\tCI\tBROKEN\tmain\tfailed"
+	if got != want {
+		t.Fatalf("formatRow = %q, want %q", got, want)
+	}
+	got = formatRow(tui.Row{Repo: "a/b", Workflow: "-", Status: tui.StatusError, Error: "boom"})
+	want = "a/b\t-\tERROR\tboom"
+	if got != want {
+		t.Fatalf("formatRow error = %q, want %q", got, want)
 	}
 }
 
