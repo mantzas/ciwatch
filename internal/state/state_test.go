@@ -1,8 +1,10 @@
 package state
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -39,5 +41,73 @@ func TestLoadCorruptAndSchema(t *testing.T) {
 	}
 	if _, err := Load(old); err == nil {
 		t.Fatal("expected schema error")
+	}
+}
+
+func TestLoadInitializesMissingMaps(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"schema_version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.MarkNotified("A/B", 1, 1)
+	if !cache.WasNotified("a/b", 1, 1) {
+		t.Fatalf("notified map was not initialized: %+v", cache)
+	}
+	cache.ETags[RepoKey("A/B")] = `"etag"`
+	if cache.ETags["a/b"] != `"etag"` {
+		t.Fatalf("etag map was not initialized: %+v", cache)
+	}
+}
+
+func TestSaveInitializesNilMapsAndCreatesDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "state.json")
+	if err := Save(path, Cache{}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.SchemaVersion != SchemaVersion || loaded.NotifiedRuns == nil || loaded.ETags == nil {
+		t.Fatalf("unexpected cache: %+v", loaded)
+	}
+}
+
+func TestLoadDefaultUsesXDGCacheHome(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", dir)
+	cache, path, err := LoadDefault()
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected missing cache, got %v", err)
+	}
+	if cache.SchemaVersion != SchemaVersion {
+		t.Fatalf("unexpected cache: %+v", cache)
+	}
+	want := filepath.Join(dir, "ciwatch", "state.json")
+	if path != want || DefaultPath() != want {
+		t.Fatalf("path = %q default = %q want %q", path, DefaultPath(), want)
+	}
+}
+
+func TestLoadDefaultReturnsInvalidCacheWarning(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", dir)
+	path := DefaultPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache, gotPath, err := LoadDefault()
+	if err == nil || !strings.Contains(err.Error(), "unexpected end") {
+		t.Fatalf("expected corrupt cache error, got %v", err)
+	}
+	if gotPath != path || cache.SchemaVersion != SchemaVersion {
+		t.Fatalf("path/cache = %q %+v", gotPath, cache)
 	}
 }
