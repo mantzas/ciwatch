@@ -1,6 +1,6 @@
 module github.com/mantzas/ciwatch
 
-go 1.26
+go 1.25
 
 require (
 	github.com/charmbracelet/bubbles v0.21.0
