@@ -43,6 +43,9 @@ Validation rejects malformed TOML, unknown fields, duplicate repos, invalid `own
 ```sh
 ciwatch
 ciwatch --config ./config.toml
+ciwatch --doctor
+ciwatch --print-config-paths
+ciwatch --once
 ciwatch --version
 ```
 
@@ -54,6 +57,12 @@ Keys:
 - `q` or `Ctrl+C`: quit
 
 Rows are ordered as repository errors first, workflow runs by last run time descending, and repositories with no runs last.
+
+For setup and scripts:
+
+- `--doctor`: checks config loading, `gh auth token`, and the cache path.
+- `--print-config-paths`: prints the config paths that would be checked.
+- `--once`: fetches once, prints a tab-separated summary, and exits without the TUI.
 
 ## Notifications
 
@@ -83,6 +92,7 @@ The footer shows repository count, projected worst-case budget use, live remaini
 
 ## Troubleshooting
 
+- Start with `ciwatch --doctor` to check config, GitHub auth, and cache state.
 - `github auth failed`: install `gh`, ensure it is on `PATH`, and run `gh auth login`.
 - `config not found`: create a config at one of the checked paths or pass `--config`.
 - API errors appear as repository-level `ERROR` rows and retry on the next poll.

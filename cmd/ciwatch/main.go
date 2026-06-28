@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -29,6 +30,9 @@ func run(args []string) int {
 	fs := flag.NewFlagSet("ciwatch", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	configPath := fs.String("config", "", "path to config file")
+	printConfigPaths := fs.Bool("print-config-paths", false, "print checked config paths and exit")
+	doctor := fs.Bool("doctor", false, "check config, GitHub auth, and cache path")
+	once := fs.Bool("once", false, "fetch once, print a plain text summary, and exit")
 	showVersion := fs.Bool("version", false, "print version")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -40,6 +44,15 @@ func run(args []string) int {
 	if *showVersion {
 		fmt.Printf("ciwatch %s\n", version)
 		return 0
+	}
+	if *printConfigPaths {
+		for _, path := range config.CheckedPaths(*configPath) {
+			fmt.Println(path)
+		}
+		return 0
+	}
+	if *doctor {
+		return runDoctor(*configPath)
 	}
 
 	cfg, meta, err := config.Load(*configPath)
@@ -64,6 +77,9 @@ func run(args []string) int {
 
 	client := ghapi.NewClient(token, &http.Client{Timeout: 15 * time.Second})
 	runner := tui.NewRunner(cfg, client, cache, cacheWarn != nil)
+	if *once {
+		return runOnce(runner)
+	}
 	app := tui.NewModel(cfg, runner, notify.New(runtime.GOOS, exec.CommandContext), cachePath)
 
 	program := tea.NewProgram(app, tea.WithAltScreen())
@@ -79,4 +95,70 @@ func run(args []string) int {
 		}
 	}
 	return 0
+}
+
+func runDoctor(configPath string) int {
+	ok := true
+	_, meta, err := config.Load(configPath)
+	if err != nil {
+		ok = false
+		fmt.Printf("config: FAIL %v\n", err)
+		for _, path := range meta.CheckedPaths {
+			fmt.Printf("config path: %s\n", path)
+		}
+	} else {
+		fmt.Printf("config: OK %s\n", meta.Path)
+	}
+
+	if _, err := ghapi.TokenFromGH(context.Background(), exec.CommandContext, 10*time.Second); err != nil {
+		ok = false
+		fmt.Printf("github auth: FAIL %v\n", err)
+	} else {
+		fmt.Println("github auth: OK")
+	}
+
+	cache, path, err := state.LoadDefault()
+	fmt.Printf("cache path: %s\n", path)
+	switch {
+	case err == nil:
+		fmt.Println("cache: OK")
+	case errors.Is(err, os.ErrNotExist):
+		fmt.Println("cache: MISSING")
+	default:
+		ok = false
+		fmt.Printf("cache: WARN %v\n", err)
+	}
+	if cache.SchemaVersion != 0 {
+		fmt.Printf("cache schema: %d\n", cache.SchemaVersion)
+	}
+	if !ok {
+		return 1
+	}
+	return 0
+}
+
+func runOnce(runner *tui.GitHubRunner) int {
+	snapshot, err := runner.Refresh(context.Background())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "refresh failed: %v\n", err)
+		return 1
+	}
+	for _, row := range snapshot.Rows {
+		fmt.Println(formatRow(row))
+	}
+	return 0
+}
+
+func formatRow(row tui.Row) string {
+	parts := []string{row.Repo, row.Workflow, string(row.Status)}
+	if row.Branch != "" {
+		parts = append(parts, row.Branch)
+	}
+	if row.Title != "" {
+		parts = append(parts, row.Title)
+	}
+	if row.Error != "" {
+		parts = append(parts, row.Error)
+	}
+	return strings.Join(parts, "\t")
 }
