@@ -1,0 +1,6 @@
+# Default ownership for the repository.
+* @mantzas
+
+# Workflow and repository policy changes are security-sensitive.
+/.github/ @mantzas
+/AGENTS.md @mantzas
