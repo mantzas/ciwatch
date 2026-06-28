@@ -70,7 +70,13 @@ Broken conclusions are `failure`, `timed_out`, and `action_required`. `cancelled
 
 The first poll after a missing or rebuilt cache baselines the current state without notifications. Later broken run attempts are deduped by `repo`, run ID, and run attempt, so a failed rerun can notify again.
 
-Terminal notifications appear in the TUI event log. On macOS, native notifications are enabled by default through `osascript` and can be disabled with:
+Terminal notifications appear in the TUI event log. Native desktop notifications are enabled by default where supported:
+
+- macOS uses `osascript`.
+- Linux uses `notify-send`, when available.
+- Windows uses built-in PowerShell toast APIs on supported desktops.
+
+The existing `notify_macos` setting controls native desktop notifications for compatibility and can be disabled with:
 
 ```toml
 notify_macos = false
@@ -96,4 +102,4 @@ The footer shows repository count, projected worst-case budget use, live remaini
 - `github auth failed`: install `gh`, ensure it is on `PATH`, and run `gh auth login`.
 - `config not found`: create a config at one of the checked paths or pass `--config`.
 - API errors appear as repository-level `ERROR` rows and retry on the next poll.
-- macOS notification failures appear once in the TUI event log.
+- Native notification failures appear once in the TUI event log.
