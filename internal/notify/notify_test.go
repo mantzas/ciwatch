@@ -72,6 +72,37 @@ func TestOpenUsesPlatformCommand(t *testing.T) {
 	}
 }
 
+func TestOpenErrorsAndPlatformCommands(t *testing.T) {
+	if err := New("linux", nil).Open(""); err == nil {
+		t.Fatal("expected no url error")
+	}
+
+	tests := map[string]struct {
+		want string
+		args []string
+	}{
+		"linux":   {want: "xdg-open", args: []string{"https://example.test"}},
+		"windows": {want: "rundll32", args: []string{"url.dll,FileProtocolHandler", "https://example.test"}},
+	}
+	for goos, tt := range tests {
+		t.Run(goos, func(t *testing.T) {
+			var call string
+			var gotArgs []string
+			svc := New(goos, func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				call = name
+				gotArgs = append([]string(nil), args...)
+				return exec.CommandContext(ctx, "true")
+			})
+			if err := svc.Open("https://example.test"); err != nil {
+				t.Fatal(err)
+			}
+			if call != tt.want || strings.Join(gotArgs, "\x00") != strings.Join(tt.args, "\x00") {
+				t.Fatalf("call = %s args = %v, want %s %v", call, gotArgs, tt.want, tt.args)
+			}
+		})
+	}
+}
+
 func TestWindowsToastScriptQuotesSingleQuotes(t *testing.T) {
 	script := windowsToastScript("ciwatch: a/b", "workflow's branch")
 	if !strings.Contains(script, "'workflow''s branch'") {

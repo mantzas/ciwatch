@@ -22,6 +22,17 @@ import (
 
 const version = "0.1.0"
 
+var (
+	loadConfig         = config.Load
+	checkedConfigPaths = config.CheckedPaths
+	configSample       = config.Sample
+	tokenFromGH        = ghapi.TokenFromGH
+	loadDefaultState   = state.LoadDefault
+	newRunner          = func(cfg config.Config, client tui.GitHubClient, cache state.Cache, rebuilt bool) tui.Runner {
+		return tui.NewRunner(cfg, client, cache, rebuilt)
+	}
+)
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -46,7 +57,7 @@ func run(args []string) int {
 		return 0
 	}
 	if *printConfigPaths {
-		for _, path := range config.CheckedPaths(*configPath) {
+		for _, path := range checkedConfigPaths(*configPath) {
 			fmt.Println(path)
 		}
 		return 0
@@ -55,28 +66,28 @@ func run(args []string) int {
 		return runDoctor(*configPath)
 	}
 
-	cfg, meta, err := config.Load(*configPath)
+	cfg, meta, err := loadConfig(*configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		if errors.Is(err, config.ErrNotFound) {
-			fmt.Fprintln(os.Stderr, config.Sample(meta.CheckedPaths))
+			fmt.Fprintln(os.Stderr, configSample(meta.CheckedPaths))
 		}
 		return 1
 	}
 
-	token, err := ghapi.TokenFromGH(context.Background(), exec.CommandContext, 10*time.Second)
+	token, err := tokenFromGH(context.Background(), exec.CommandContext, 10*time.Second)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "github auth failed: %v\nrun `gh auth login` and ensure `gh` is on PATH\n", err)
 		return 1
 	}
 
-	cache, cachePath, cacheWarn := state.LoadDefault()
+	cache, cachePath, cacheWarn := loadDefaultState()
 	if cacheWarn != nil {
 		fmt.Fprintf(os.Stderr, "warning: cache ignored: %v\n", cacheWarn)
 	}
 
 	client := ghapi.NewClient(token, &http.Client{Timeout: 15 * time.Second})
-	runner := tui.NewRunner(cfg, client, cache, cacheWarn != nil)
+	runner := newRunner(cfg, client, cache, cacheWarn != nil)
 	if *once {
 		return runOnce(runner)
 	}
@@ -99,7 +110,7 @@ func run(args []string) int {
 
 func runDoctor(configPath string) int {
 	ok := true
-	_, meta, err := config.Load(configPath)
+	_, meta, err := loadConfig(configPath)
 	if err != nil {
 		ok = false
 		fmt.Printf("config: FAIL %v\n", err)
@@ -110,14 +121,14 @@ func runDoctor(configPath string) int {
 		fmt.Printf("config: OK %s\n", meta.Path)
 	}
 
-	if _, err := ghapi.TokenFromGH(context.Background(), exec.CommandContext, 10*time.Second); err != nil {
+	if _, err := tokenFromGH(context.Background(), exec.CommandContext, 10*time.Second); err != nil {
 		ok = false
 		fmt.Printf("github auth: FAIL %v\n", err)
 	} else {
 		fmt.Println("github auth: OK")
 	}
 
-	cache, path, err := state.LoadDefault()
+	cache, path, err := loadDefaultState()
 	fmt.Printf("cache path: %s\n", path)
 	switch {
 	case err == nil:
@@ -137,7 +148,9 @@ func runDoctor(configPath string) int {
 	return 0
 }
 
-func runOnce(runner *tui.GitHubRunner) int {
+func runOnce(runner interface {
+	Refresh(context.Context) (tui.Snapshot, error)
+}) int {
 	snapshot, err := runner.Refresh(context.Background())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "refresh failed: %v\n", err)

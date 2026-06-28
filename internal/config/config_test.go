@@ -62,6 +62,48 @@ func TestLoadLookupOrderAndMissingSample(t *testing.T) {
 	}
 }
 
+func TestCheckedPathsUsesExplicitPathAndXDGDefault(t *testing.T) {
+	explicit := filepath.Join(t.TempDir(), "ciwatch.toml")
+	if got := CheckedPaths(explicit); len(got) != 1 || got[0] != explicit {
+		t.Fatalf("explicit checked paths = %+v", got)
+	}
+
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	got := CheckedPaths("")
+	want := []string{filepath.Join(".", "config.toml"), filepath.Join(dir, "ciwatch", "config.toml")}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("checked paths = %+v, want %+v", got, want)
+	}
+}
+
+func TestLoadUsesDefaultLookupPath(t *testing.T) {
+	dir := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldwd); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, "xdg"))
+	if err := os.WriteFile("config.toml", []byte(`repos = ["a/b"]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, meta, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Repos[0] != "a/b" || meta.Path != filepath.Join(".", "config.toml") {
+		t.Fatalf("load = %+v %+v", cfg, meta)
+	}
+}
+
 func TestParseExplicitValues(t *testing.T) {
 	cfg, err := Parse([]byte("repos = [\"a/b\"]\npoll_interval = \"15s\"\nruns_per_repo = 20\nnotify_macos = false\n"))
 	if err != nil {
