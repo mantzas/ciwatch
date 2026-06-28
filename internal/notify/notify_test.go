@@ -2,9 +2,11 @@ package notify
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNotificationsUsePlatformCommand(t *testing.T) {
@@ -70,6 +72,36 @@ func TestOpenUsesPlatformCommand(t *testing.T) {
 	if len(calls) != 2 || calls[0] != "osascript" || calls[1] != "open" {
 		t.Fatalf("unexpected calls: %v", calls)
 	}
+}
+
+func TestOpenWaitsForCommandCompletion(t *testing.T) {
+	marker := t.TempDir() + "/opened"
+	svc := New("darwin", func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperOpenCommand", "--", marker)
+		cmd.Env = append(os.Environ(), "CIWATCH_HELPER_OPEN=1")
+		return cmd
+	})
+	if err := svc.Open("https://github.com/a/b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("open returned before command completed: %v", err)
+	}
+}
+
+func TestHelperOpenCommand(t *testing.T) {
+	if os.Getenv("CIWATCH_HELPER_OPEN") != "1" {
+		return
+	}
+	if len(os.Args) == 0 {
+		os.Exit(2)
+	}
+	marker := os.Args[len(os.Args)-1]
+	time.Sleep(50 * time.Millisecond)
+	if err := os.WriteFile(marker, []byte("opened\n"), 0o600); err != nil {
+		os.Exit(2)
+	}
+	os.Exit(0)
 }
 
 func TestOpenErrorsAndPlatformCommands(t *testing.T) {

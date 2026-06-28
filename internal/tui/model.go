@@ -219,11 +219,15 @@ func tick() tea.Cmd {
 
 func (m *Model) applyRows() {
 	rows := make([]table.Row, 0, len(m.rows))
+	groupRows := rowsByRepo(m.rows)
+	seenRows := map[string]int{}
 	for _, row := range m.rows {
+		repo, workflow := threadCells(row, seenRows[row.Repo], groupRows[row.Repo])
 		rows = append(rows, table.Row{
-			row.Repo, row.Workflow, statusLabel(row.Status), displayRef(row), row.Event,
+			repo, workflow, coloredStatusLabel(row.Status), displayRef(row), row.Event,
 			age(row.UpdatedAt), duration(row.StartedAt, row.FinishedAt), titleSHA(row),
 		})
+		seenRows[row.Repo]++
 	}
 	m.table.SetRows(rows)
 }
@@ -264,15 +268,36 @@ func (m *Model) resizeColumns(width int) {
 		return
 	}
 	fixed := 18 + 12 + 10 + 8 + 9
-	remaining := max(20, width-fixed-12)
-	workflow := min(24, max(12, remaining/3))
-	ref := min(18, max(10, remaining/5))
+	remaining := max(20, width-fixed-10)
+	workflow := min(28, max(16, remaining/3))
+	ref := min(22, max(12, remaining/5))
 	title := max(16, remaining-workflow-ref)
 	m.table.SetColumns([]table.Column{
 		{Title: "REPO", Width: 18}, {Title: "WORKFLOW", Width: workflow}, {Title: "STATUS", Width: 12},
 		{Title: "REF", Width: ref}, {Title: "EVENT", Width: 10}, {Title: "AGE", Width: 8},
 		{Title: "DURATION", Width: 9}, {Title: "TITLE/SHA", Width: title},
 	})
+}
+
+func rowsByRepo(rows []Row) map[string]int {
+	counts := map[string]int{}
+	for _, row := range rows {
+		counts[row.Repo]++
+	}
+	return counts
+}
+
+func threadCells(row Row, idx, total int) (string, string) {
+	if total <= 1 {
+		return row.Repo, row.Workflow
+	}
+	if idx == 0 {
+		return row.Repo, "┌ " + row.Workflow
+	}
+	if idx == total-1 {
+		return "", "└ " + row.Workflow
+	}
+	return "", "├ " + row.Workflow
 }
 
 func statusLabel(s Status) string {
@@ -287,6 +312,22 @@ func statusLabel(s Status) string {
 		return "• NEUTRAL"
 	default:
 		return "! ERROR"
+	}
+}
+
+func coloredStatusLabel(s Status) string {
+	label := statusLabel(s)
+	switch s {
+	case StatusBroken, StatusError:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true).Render(label)
+	case StatusRunning:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render(label)
+	case StatusOK:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render(label)
+	case StatusNeutral:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(label)
+	default:
+		return label
 	}
 }
 
@@ -317,6 +358,34 @@ func SortRows(rows []Row) {
 		}
 		if a.Repo != b.Repo {
 			return a.Repo < b.Repo
+		}
+		return a.Workflow < b.Workflow
+	})
+}
+
+func SortRowsByRepoOrder(rows []Row, repos []string) {
+	order := make(map[string]int, len(repos))
+	for idx, repo := range repos {
+		order[NormalizeRepo(repo)] = idx
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		aRank, aKnown := order[NormalizeRepo(a.Repo)]
+		bRank, bKnown := order[NormalizeRepo(b.Repo)]
+		if aKnown != bKnown {
+			return aKnown
+		}
+		if aKnown && aRank != bRank {
+			return aRank < bRank
+		}
+		if !aKnown && a.Repo != b.Repo {
+			return a.Repo < b.Repo
+		}
+		if rank(a.Kind) != rank(b.Kind) {
+			return rank(a.Kind) < rank(b.Kind)
+		}
+		if a.Kind == RowRun && !a.UpdatedAt.Equal(b.UpdatedAt) {
+			return a.UpdatedAt.After(b.UpdatedAt)
 		}
 		return a.Workflow < b.Workflow
 	})
