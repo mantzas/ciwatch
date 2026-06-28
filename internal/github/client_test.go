@@ -3,9 +3,11 @@ package github
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,5 +69,65 @@ func TestTokenFromGH(t *testing.T) {
 	}, time.Second)
 	if err != nil || token != "abc" {
 		t.Fatalf("token=%q err=%v", token, err)
+	}
+}
+
+func TestClientDefaultsAPIErrorAndRepoURL(t *testing.T) {
+	client := NewClient("token", nil)
+	if client.http == nil || client.base != apiBase || cap(client.sem) != 4 {
+		t.Fatalf("client defaults not applied: %+v", client)
+	}
+	if got := (&APIError{StatusCode: http.StatusForbidden}).Error(); got != "github api 403" {
+		t.Fatalf("api error without message = %q", got)
+	}
+	if got := RepoURL("Owner/Repo With Space"); got != "https://github.com/Owner/Repo%20With%20Space" {
+		t.Fatalf("RepoURL = %q", got)
+	}
+}
+
+func TestTokenFromGHErrors(t *testing.T) {
+	_, err := TokenFromGH(context.Background(), func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "printf", " \n")
+	}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "empty token") {
+		t.Fatalf("expected empty token error, got %v", err)
+	}
+
+	_, err = TokenFromGH(context.Background(), func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "false")
+	}, 0)
+	if err == nil || !strings.Contains(err.Error(), "unable to read token") {
+		t.Fatalf("expected command error, got %v", err)
+	}
+}
+
+func TestWorkflowRunsInvalidResponseBranches(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/bad-json/") {
+			_, _ = fmt.Fprint(w, `{`)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = fmt.Fprint(w, `not-json`)
+	}))
+	defer srv.Close()
+	client := NewClient("token", srv.Client())
+	client.SetBaseURL(srv.URL + "/bad-json")
+	if _, err := client.WorkflowRuns(context.Background(), "a/b", 5, ""); err == nil {
+		t.Fatal("expected bad json error")
+	}
+
+	client.SetBaseURL(srv.URL)
+	_, err := client.WorkflowRuns(context.Background(), "a/b", 5, "")
+	apiErr, ok := err.(*APIError)
+	if !ok || apiErr.Message != "" || apiErr.Error() != "github api 500" {
+		t.Fatalf("expected empty-message API error, got %#v", err)
+	}
+
+	if got := readErrorMessage(strings.NewReader(`{"message":"nope"}`)); got != "nope" {
+		t.Fatalf("readErrorMessage json = %q", got)
+	}
+	if got := readErrorMessage(io.NopCloser(strings.NewReader(`not-json`))); got != "" {
+		t.Fatalf("readErrorMessage invalid = %q", got)
 	}
 }

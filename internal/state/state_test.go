@@ -111,3 +111,27 @@ func TestLoadDefaultReturnsInvalidCacheWarning(t *testing.T) {
 		t.Fatalf("path/cache = %q %+v", gotPath, cache)
 	}
 }
+
+func TestLoadDefaultSuccessAndNilMapMarkNotified(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", dir)
+	path := DefaultPath()
+	cache := New()
+	cache.ETags["a/b"] = `"etag"`
+	if err := Save(path, cache); err != nil {
+		t.Fatal(err)
+	}
+	loaded, gotPath, err := LoadDefault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != path || loaded.ETags["a/b"] != `"etag"` {
+		t.Fatalf("LoadDefault = %+v %q", loaded, gotPath)
+	}
+
+	var empty Cache
+	empty.MarkNotified("A/B", 1, 2)
+	if !empty.WasNotified("a/b", 1, 2) {
+		t.Fatalf("MarkNotified did not initialize nil map: %+v", empty)
+	}
+}

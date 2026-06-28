@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -177,6 +179,146 @@ func TestModelKeyHandlingOpenAndEventCap(t *testing.T) {
 	}
 }
 
+func TestModelViewSaveRefreshAndResize(t *testing.T) {
+	cfg := config.Config{Repos: []string{"a/b", "c/d"}, PollInterval: time.Minute, RunsPerRepo: 1}
+	cachePath := filepath.Join(t.TempDir(), "state.json")
+	cache := state.New()
+	cache.Baseline = true
+	model := NewModel(cfg, &fakeRunner{cache: cache}, &fakeNotifier{}, cachePath)
+	model.rows = []Row{{
+		Kind: RowRun, Repo: "a/b", Workflow: "CI", Status: StatusOK, Branch: "main",
+		Event: "push", Title: "ok", UpdatedAt: time.Now().Add(-time.Minute),
+		StartedAt: time.Now().Add(-2 * time.Minute), FinishedAt: time.Now().Add(-time.Minute),
+	}}
+	model.rate = RateStatus{Limit: 5000, Remaining: 4990, Reset: time.Now().Add(time.Hour), Projected: 0.25, Warning: true}
+	model.err = "last refresh failed"
+	model.refreshing = true
+	model.next = time.Now().Add(time.Minute)
+	model.addEvent("broken: a/b CI main")
+	model.applyRows()
+
+	view := model.View()
+	for _, want := range []string{"repos:2", "RATE RISK", "refreshing", "last refresh failed", "broken: a/b CI main"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("view missing %q:\n%s", want, view)
+		}
+	}
+	if err := model.SaveState(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("state was not saved: %v", err)
+	}
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 96, Height: 18})
+	got := updated.(Model)
+	if got.width != 96 || got.height != 18 || len(got.table.Columns()) != 8 {
+		t.Fatalf("resize not applied: width=%d height=%d cols=%d", got.width, got.height, len(got.table.Columns()))
+	}
+}
+
+func TestModelRefreshCommandPendingAndError(t *testing.T) {
+	cfg := config.Config{Repos: []string{"a/b"}, PollInterval: time.Minute, RunsPerRepo: 1}
+	runner := &fakeRunner{snapshot: Snapshot{Rows: []Row{{Kind: RowRun, Repo: "a/b", Workflow: "CI", Status: StatusOK}}}, cache: state.New()}
+	model := NewModel(cfg, runner, &fakeNotifier{}, "state.json")
+
+	queued, cmd := model.queueRefresh()
+	if !queued.refreshing || cmd == nil {
+		t.Fatalf("refresh was not queued: refreshing=%v cmd nil=%v", queued.refreshing, cmd == nil)
+	}
+	queuedAgain, cmd := queued.queueRefresh()
+	if !queuedAgain.pending || cmd != nil {
+		t.Fatalf("second refresh should mark pending without command: pending=%v cmd=%v", queuedAgain.pending, cmd)
+	}
+
+	msg := runnerRefreshMsg(t, queued.refreshCmd())
+	if msg.err != nil || len(msg.snapshot.Rows) != 1 {
+		t.Fatalf("refresh command returned %#v", msg)
+	}
+	updated, cmd := queuedAgain.Update(msg)
+	got := updated.(Model)
+	if !got.refreshing || got.pending || cmd == nil {
+		t.Fatalf("pending refresh was not started: refreshing=%v pending=%v cmd nil=%v", got.refreshing, got.pending, cmd == nil)
+	}
+
+	runner.err = errors.New("network down")
+	msg = runnerRefreshMsg(t, got.refreshCmd())
+	updated, _ = got.Update(msg)
+	got = updated.(Model)
+	if got.err != "network down" || len(got.events) == 0 || !strings.Contains(got.events[len(got.events)-1], "refresh failed: network down") {
+		t.Fatalf("refresh error not recorded: err=%q events=%+v", got.err, got.events)
+	}
+}
+
+func TestModelTickOpenErrorAndQuitKeys(t *testing.T) {
+	cfg := config.Config{Repos: []string{"a/b"}, PollInterval: time.Minute, RunsPerRepo: 1}
+	model := NewModel(cfg, &fakeRunner{cache: state.New()}, &fakeNotifier{err: errors.New("no browser")}, "state.json")
+	model.next = time.Now().Add(-time.Second)
+	updated, cmd := model.Update(tickMsg(time.Now()))
+	got := updated.(Model)
+	if !got.refreshing || cmd == nil {
+		t.Fatalf("expired tick should queue refresh: refreshing=%v cmd nil=%v", got.refreshing, cmd == nil)
+	}
+
+	model.rows = []Row{{Kind: RowRun, Repo: "a/b", URL: "https://example.test"}}
+	model.applyRows()
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
+	got = updated.(Model)
+	if len(got.events) == 0 || !strings.Contains(got.events[len(got.events)-1], "open failed: no browser") {
+		t.Fatalf("open error not recorded: %+v", got.events)
+	}
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd == nil {
+		t.Fatal("quit key should return a command")
+	}
+	_, cmd = model.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("ctrl+c should return a command")
+	}
+}
+
+func TestFormattingHelpers(t *testing.T) {
+	now := time.Now()
+	tests := map[Status]string{
+		StatusBroken:  "✖ BROKEN",
+		StatusRunning: "… RUNNING",
+		StatusOK:      "✓ OK",
+		StatusNeutral: "• NEUTRAL",
+		StatusError:   "! ERROR",
+	}
+	for status, want := range tests {
+		if got := statusLabel(status); got != want {
+			t.Fatalf("statusLabel(%s) = %q, want %q", status, got, want)
+		}
+	}
+	if displayRef(Row{Branch: "main", SHA: "abcdef123"}) != "main" || displayRef(Row{SHA: "abcdef123"}) != "abcdef123" {
+		t.Fatal("displayRef did not prefer branch then SHA")
+	}
+	if titleSHA(Row{Title: "title", SHA: "abcdef123"}) != "title" || titleSHA(Row{SHA: "abcdef123"}) != "abcdef1" || titleSHA(Row{SHA: "abc"}) != "abc" {
+		t.Fatal("titleSHA formatting failed")
+	}
+	if age(time.Time{}) != "-" || duration(time.Time{}, now) != "-" || until(time.Time{}) != "-" {
+		t.Fatal("zero time helpers should return dashes")
+	}
+	if got := duration(now.Add(-90*time.Second), now); got != "1m30s" {
+		t.Fatalf("duration = %q", got)
+	}
+	if min(1, 2) != 1 || max(1, 2) != 2 {
+		t.Fatal("min/max failed")
+	}
+	model := NewModel(config.Config{}, &fakeRunner{cache: state.New()}, &fakeNotifier{}, "")
+	if model.rateText() != "unknown" {
+		t.Fatalf("empty rateText = %q", model.rateText())
+	}
+	model.rate = RateStatus{Limit: 5000, Remaining: 2500, Projected: 0.5}
+	if got := model.rateText(); !strings.Contains(got, "2500/5000") || !strings.Contains(got, "projected:50%") {
+		t.Fatalf("rateText = %q", got)
+	}
+	if NormalizeRepo("Owner/Repo") != "owner/repo" {
+		t.Fatal("NormalizeRepo did not lowercase")
+	}
+}
+
 type fakeClient struct {
 	runs []ghapi.Run
 	err  error
@@ -254,4 +396,13 @@ func assertRow(t *testing.T, rows []Row, repo string, kind RowKind, status Statu
 		}
 	}
 	t.Fatalf("row for %s not found in %+v", repo, rows)
+}
+
+func runnerRefreshMsg(t *testing.T, cmd tea.Cmd) refreshMsg {
+	t.Helper()
+	msg, ok := cmd().(refreshMsg)
+	if !ok {
+		t.Fatalf("command returned %#v", msg)
+	}
+	return msg
 }
