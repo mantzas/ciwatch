@@ -36,10 +36,10 @@ func TestClassifyAndSortRows(t *testing.T) {
 func TestSortRowsByRepoOrderGroupsConfiguredRepos(t *testing.T) {
 	now := time.Now()
 	rows := []Row{
-		{Kind: RowRun, Repo: "beatlabs/harvester", ContextKey: "push:main:old", Workflow: "old", Status: StatusOK, UpdatedAt: now.Add(-time.Hour)},
-		{Kind: RowRun, Repo: "mantzas/ciwatch", ContextKey: "push:main:new", Workflow: "new", Status: StatusOK, UpdatedAt: now},
-		{Kind: RowRun, Repo: "beatlabs/patron", ContextKey: "push:main:patron", Workflow: "patron", Status: StatusOK, UpdatedAt: now.Add(-time.Minute)},
-		{Kind: RowRun, Repo: "beatlabs/harvester", ContextKey: "push:main:fresh", Workflow: "fresh", Status: StatusOK, UpdatedAt: now.Add(-time.Second)},
+		{Kind: RowRun, Repo: "beatlabs/harvester", ContextKey: "push:main", Workflow: "old", Status: StatusOK, UpdatedAt: now.Add(-time.Hour)},
+		{Kind: RowRun, Repo: "mantzas/ciwatch", ContextKey: "push:main", Workflow: "new", Status: StatusOK, UpdatedAt: now},
+		{Kind: RowRun, Repo: "beatlabs/patron", ContextKey: "push:main", Workflow: "patron", Status: StatusOK, UpdatedAt: now.Add(-time.Minute)},
+		{Kind: RowRun, Repo: "beatlabs/harvester", ContextKey: "push:main", Workflow: "fresh", Status: StatusOK, UpdatedAt: now.Add(-time.Second)},
 	}
 
 	SortRowsByRepoOrder(rows, []string{"mantzas/ciwatch", "beatlabs/patron", "beatlabs/harvester"})
@@ -182,7 +182,7 @@ func TestRunnerMapsPullRequestAndDirectPushContexts(t *testing.T) {
 	if rows[0].Context != "PR #26 Add feature" || rows[0].ContextKey != "pr:26" || rows[0].ContextURL != "https://github.com/owner/repo/pull/26" {
 		t.Fatalf("pr context = %+v", rows[0])
 	}
-	if rows[1].Context != "main direct push" || rows[1].ContextKey != "push:main:def456" || rows[1].ContextURL != "" {
+	if rows[1].Context != "main direct push" || rows[1].ContextKey != "push:main" || rows[1].ContextURL != "" {
 		t.Fatalf("direct push context = %+v", rows[1])
 	}
 
@@ -199,8 +199,45 @@ func TestRunnerMapsPullRequestAndDirectPushContexts(t *testing.T) {
 		ID: 4, Attempt: 1, Name: "nightly", Status: "queued", Branch: "", Event: "schedule",
 		HeadSHA: "abc777", URL: "https://example.test/run/4", UpdatedAt: now,
 	}})
-	if scheduled[0].Context != "abc777 schedule" || scheduled[0].ContextKey != "schedule::abc777" {
+	if scheduled[0].Context != "abc777 schedule" || scheduled[0].ContextKey != "schedule:abc777" {
 		t.Fatalf("scheduled context = %+v", scheduled[0])
+	}
+}
+
+func TestRunnerCompactsDuplicateContextRunsAndPrefersPullRequestRows(t *testing.T) {
+	now := time.Now()
+	rows := mapRuns("owner/repo", []ghapi.Run{
+		{
+			ID: 10, Attempt: 1, Name: "CI", Status: "completed", Conclusion: "success",
+			Branch: "feature", Event: "pull_request", Title: "Add feature", HeadSHA: "abc123",
+			URL: "https://example.test/pr-run", UpdatedAt: now,
+			PullRequests: []ghapi.PullRequest{{Number: 26, URL: "https://github.com/owner/repo/pull/26"}},
+		},
+		{
+			ID: 11, Attempt: 1, Name: "CI", Status: "completed", Conclusion: "success",
+			Branch: "feature", Event: "push", Title: "Add feature", HeadSHA: "abc123",
+			URL: "https://example.test/push-run", UpdatedAt: now.Add(time.Second),
+		},
+		{
+			ID: 12, Attempt: 1, Name: "Scheduled", Status: "completed", Conclusion: "success",
+			Branch: "master", Event: "dynamic", Title: "older", HeadSHA: "old",
+			URL: "https://example.test/old", UpdatedAt: now.Add(-time.Hour),
+		},
+		{
+			ID: 13, Attempt: 1, Name: "Scheduled", Status: "completed", Conclusion: "success",
+			Branch: "master", Event: "dynamic", Title: "newer", HeadSHA: "new",
+			URL: "https://example.test/new", UpdatedAt: now.Add(-time.Minute),
+		},
+	})
+
+	if len(rows) != 2 {
+		t.Fatalf("compacted rows = %+v", rows)
+	}
+	if rows[0].ContextKey != "pr:26" || rows[0].URL != "https://example.test/pr-run" {
+		t.Fatalf("pr row should win over push row for same SHA: %+v", rows[0])
+	}
+	if rows[1].ContextKey != "dynamic:master" || rows[1].Title != "newer" {
+		t.Fatalf("latest workflow row should win: %+v", rows[1])
 	}
 }
 

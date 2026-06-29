@@ -125,7 +125,7 @@ func mapRuns(repo string, runs []ghapi.Run) []Row {
 			RunID: run.ID, Attempt: run.Attempt,
 		})
 	}
-	return rows
+	return compactRows(rows)
 }
 
 func runContext(repo string, run ghapi.Run) string {
@@ -153,10 +153,14 @@ func runContextKey(run ghapi.Run) string {
 	if len(run.PullRequests) > 0 && run.PullRequests[0].Number > 0 {
 		return fmt.Sprintf("pr:%d", run.PullRequests[0].Number)
 	}
-	if run.Event == "push" {
-		return "push:" + run.Branch + ":" + run.HeadSHA
+	ref := run.Branch
+	if ref == "" {
+		ref = run.HeadSHA
 	}
-	return run.Event + ":" + run.Branch + ":" + run.HeadSHA
+	if run.Event == "push" {
+		return "push:" + ref
+	}
+	return run.Event + ":" + ref
 }
 
 func runContextURL(repo string, run ghapi.Run) string {
@@ -167,6 +171,55 @@ func runContextURL(repo string, run ghapi.Run) string {
 		return run.PullRequests[0].URL
 	}
 	return ghapi.PullRequestURL(repo, run.PullRequests[0].Number)
+}
+
+func compactRows(rows []Row) []Row {
+	prSHAs := map[string]bool{}
+	for _, row := range rows {
+		if row.SHA != "" && isPRContext(row) {
+			prSHAs[row.Repo+"\x00"+row.SHA] = true
+		}
+	}
+
+	type key struct {
+		context  string
+		workflow string
+	}
+	latest := map[key]Row{}
+	var order []key
+	for _, row := range rows {
+		if row.SHA != "" && !isPRContext(row) && prSHAs[row.Repo+"\x00"+row.SHA] {
+			continue
+		}
+		k := key{context: row.ContextKey, workflow: row.Workflow}
+		current, ok := latest[k]
+		if !ok {
+			order = append(order, k)
+		}
+		if !ok || rowNewer(row, current) {
+			latest[k] = row
+		}
+	}
+
+	compacted := make([]Row, 0, len(latest))
+	for _, k := range order {
+		compacted = append(compacted, latest[k])
+	}
+	return compacted
+}
+
+func isPRContext(row Row) bool {
+	return strings.HasPrefix(row.ContextKey, "pr:")
+}
+
+func rowNewer(a, b Row) bool {
+	if !a.UpdatedAt.Equal(b.UpdatedAt) {
+		return a.UpdatedAt.After(b.UpdatedAt)
+	}
+	if a.RunID != b.RunID {
+		return a.RunID > b.RunID
+	}
+	return a.Attempt > b.Attempt
 }
 
 func mergeRate(target *RateStatus, rate ghapi.Rate) {
