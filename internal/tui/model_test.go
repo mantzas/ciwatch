@@ -36,10 +36,10 @@ func TestClassifyAndSortRows(t *testing.T) {
 func TestSortRowsByRepoOrderGroupsConfiguredRepos(t *testing.T) {
 	now := time.Now()
 	rows := []Row{
-		{Kind: RowRun, Repo: "beatlabs/harvester", Workflow: "old", UpdatedAt: now.Add(-time.Hour)},
-		{Kind: RowRun, Repo: "mantzas/ciwatch", Workflow: "new", UpdatedAt: now},
-		{Kind: RowRun, Repo: "beatlabs/patron", Workflow: "patron", UpdatedAt: now.Add(-time.Minute)},
-		{Kind: RowRun, Repo: "beatlabs/harvester", Workflow: "fresh", UpdatedAt: now.Add(-time.Second)},
+		{Kind: RowRun, Repo: "beatlabs/harvester", ContextKey: "push:main:old", Workflow: "old", Status: StatusOK, UpdatedAt: now.Add(-time.Hour)},
+		{Kind: RowRun, Repo: "mantzas/ciwatch", ContextKey: "push:main:new", Workflow: "new", Status: StatusOK, UpdatedAt: now},
+		{Kind: RowRun, Repo: "beatlabs/patron", ContextKey: "push:main:patron", Workflow: "patron", Status: StatusOK, UpdatedAt: now.Add(-time.Minute)},
+		{Kind: RowRun, Repo: "beatlabs/harvester", ContextKey: "push:main:fresh", Workflow: "fresh", Status: StatusOK, UpdatedAt: now.Add(-time.Second)},
 	}
 
 	SortRowsByRepoOrder(rows, []string{"mantzas/ciwatch", "beatlabs/patron", "beatlabs/harvester"})
@@ -48,6 +48,23 @@ func TestSortRowsByRepoOrderGroupsConfiguredRepos(t *testing.T) {
 	want := []string{"mantzas/ciwatch", "beatlabs/patron", "beatlabs/harvester", "beatlabs/harvester:old"}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("order = %+v, want %+v", got, want)
+	}
+}
+
+func TestSortRowsKeepsContextThreadsTogetherAndBubblesFailures(t *testing.T) {
+	now := time.Now()
+	rows := []Row{
+		{Kind: RowRun, Repo: "a/b", Context: "PR #1 ok", ContextKey: "pr:1", Workflow: "test", Status: StatusOK, UpdatedAt: now.Add(time.Minute)},
+		{Kind: RowRun, Repo: "a/b", Context: "PR #2 broken", ContextKey: "pr:2", Workflow: "test", Status: StatusBroken, UpdatedAt: now},
+		{Kind: RowRun, Repo: "a/b", Context: "PR #2 broken", ContextKey: "pr:2", Workflow: "lint", Status: StatusOK, UpdatedAt: now.Add(-time.Minute)},
+	}
+
+	SortRowsByRepoOrder(rows, []string{"a/b"})
+
+	got := []string{rows[0].ContextKey + ":" + rows[0].Workflow, rows[1].ContextKey + ":" + rows[1].Workflow, rows[2].ContextKey + ":" + rows[2].Workflow}
+	want := []string{"pr:2:lint", "pr:2:test", "pr:1:test"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("context order = %+v, want %+v", got, want)
 	}
 }
 
@@ -146,6 +163,47 @@ func TestRunnerEndToEndRowsCacheErrorsAndNotModified(t *testing.T) {
 	}
 }
 
+func TestRunnerMapsPullRequestAndDirectPushContexts(t *testing.T) {
+	now := time.Now()
+	rows := mapRuns("owner/repo", []ghapi.Run{
+		{
+			ID: 1, Attempt: 1, Name: "test", Status: "completed", Conclusion: "success",
+			Branch: "feature", Event: "pull_request", Title: "Add feature", HeadSHA: "abc123",
+			URL: "https://example.test/run/1", UpdatedAt: now,
+			PullRequests: []ghapi.PullRequest{{Number: 26, URL: "https://github.com/owner/repo/pull/26"}},
+		},
+		{
+			ID: 2, Attempt: 1, Name: "lint", Status: "completed", Conclusion: "failure",
+			Branch: "main", Event: "push", Title: "Direct commit", HeadSHA: "def456",
+			URL: "https://example.test/run/2", UpdatedAt: now,
+		},
+	})
+
+	if rows[0].Context != "PR #26 Add feature" || rows[0].ContextKey != "pr:26" || rows[0].ContextURL != "https://github.com/owner/repo/pull/26" {
+		t.Fatalf("pr context = %+v", rows[0])
+	}
+	if rows[1].Context != "main direct push" || rows[1].ContextKey != "push:main:def456" || rows[1].ContextURL != "" {
+		t.Fatalf("direct push context = %+v", rows[1])
+	}
+
+	fallback := mapRuns("owner/repo", []ghapi.Run{{
+		ID: 3, Attempt: 1, Name: "scan", Status: "queued", Branch: "", Event: "schedule",
+		HeadSHA: "abc999", URL: "https://example.test/run/3", UpdatedAt: now,
+		PullRequests: []ghapi.PullRequest{{Number: 27}},
+	}})
+	if fallback[0].Context != "PR #27" || fallback[0].ContextURL != "https://github.com/owner/repo/pull/27" {
+		t.Fatalf("fallback pr context = %+v", fallback[0])
+	}
+
+	scheduled := mapRuns("owner/repo", []ghapi.Run{{
+		ID: 4, Attempt: 1, Name: "nightly", Status: "queued", Branch: "", Event: "schedule",
+		HeadSHA: "abc777", URL: "https://example.test/run/4", UpdatedAt: now,
+	}})
+	if scheduled[0].Context != "abc777 schedule" || scheduled[0].ContextKey != "schedule::abc777" {
+		t.Fatalf("scheduled context = %+v", scheduled[0])
+	}
+}
+
 func TestRunnerRefetchesColdNotModifiedResponse(t *testing.T) {
 	cfg := config.Config{Repos: []string{"owner/repo"}, PollInterval: time.Minute, RunsPerRepo: 5}
 	cache := state.New()
@@ -202,14 +260,14 @@ func TestModelRefreshMessageSendsOneNotificationFailureEvent(t *testing.T) {
 
 func TestModelKeyHandlingOpenAndEventCap(t *testing.T) {
 	cfg := config.Config{Repos: []string{"a/b"}, PollInterval: time.Minute, RunsPerRepo: 1}
-	runner := &fakeRunner{snapshot: Snapshot{Rows: []Row{{Kind: RowRun, Repo: "a/b", URL: "https://example.test"}}}}
+	runner := &fakeRunner{snapshot: Snapshot{Rows: []Row{{Kind: RowRun, Repo: "a/b", ContextURL: "https://example.test/pr", URL: "https://example.test/run"}}}}
 	notifier := &fakeNotifier{}
 	model := NewModel(cfg, runner, notifier, "state.json")
 	model.rows = runner.snapshot.Rows
 	model.applyRows()
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("o")})
 	got := updated.(Model)
-	if notifier.opened != "https://example.test" {
+	if notifier.opened != "https://example.test/pr" {
 		t.Fatalf("open not called: %q", notifier.opened)
 	}
 	for i := 0; i < 25; i++ {
@@ -223,14 +281,16 @@ func TestModelKeyHandlingOpenAndEventCap(t *testing.T) {
 func TestModelApplyRowsGroupsRepoThread(t *testing.T) {
 	model := NewModel(config.Config{}, &fakeRunner{cache: state.New()}, &fakeNotifier{}, "state.json")
 	model.rows = []Row{
-		{Kind: RowRun, Repo: "mantzas/ciwatch", Workflow: "CodeQL", Status: StatusOK},
-		{Kind: RowRun, Repo: "mantzas/ciwatch", Workflow: "CI", Status: StatusOK},
-		{Kind: RowRun, Repo: "beatlabs/patron", Workflow: "Scheduled", Status: StatusOK},
+		{Kind: RowRun, Repo: "mantzas/ciwatch", Context: "PR #26 Set default", ContextKey: "pr:26", Workflow: "CodeQL", Status: StatusOK},
+		{Kind: RowRun, Repo: "mantzas/ciwatch", Context: "PR #26 Set default", ContextKey: "pr:26", Workflow: "CI", Status: StatusOK},
+		{Kind: RowRun, Repo: "beatlabs/patron", Context: "main direct push", ContextKey: "push:main:abc", Workflow: "Scheduled", Status: StatusOK},
 	}
 	model.applyRows()
 
 	rows := model.table.Rows()
-	if rows[0][0] != "mantzas/ciwatch" || rows[0][1] != "┌ CodeQL" || rows[1][0] != "" || rows[1][1] != "└ CI" || rows[2][0] != "beatlabs/patron" {
+	if rows[0][0] != "mantzas/ciwatch" || rows[0][1] != "PR #26 Set default" || rows[0][2] != "┌ CodeQL" ||
+		rows[1][0] != "" || rows[1][1] != "" || rows[1][2] != "└ CI" ||
+		rows[2][0] != "beatlabs/patron" || rows[2][1] != "main direct push" || rows[2][2] != "Scheduled" {
 		t.Fatalf("grouped rows = %+v", rows)
 	}
 }
@@ -268,7 +328,7 @@ func TestModelViewSaveRefreshAndResize(t *testing.T) {
 
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 96, Height: 18})
 	got := updated.(Model)
-	if got.width != 96 || got.height != 18 || len(got.table.Columns()) != 8 {
+	if got.width != 96 || got.height != 18 || len(got.table.Columns()) != 9 {
 		t.Fatalf("resize not applied: width=%d height=%d cols=%d", got.width, got.height, len(got.table.Columns()))
 	}
 }
@@ -349,6 +409,17 @@ func TestFormattingHelpers(t *testing.T) {
 	}
 	if displayRef(Row{Branch: "main", SHA: "abcdef123"}) != "main" || displayRef(Row{SHA: "abcdef123"}) != "abcdef123" {
 		t.Fatal("displayRef did not prefer branch then SHA")
+	}
+	if displayContext(Row{Context: "PR #1 title"}) != "PR #1 title" ||
+		displayContext(Row{Kind: RowRun, Branch: "main", Event: "push"}) != "main direct push" ||
+		displayContext(Row{Kind: RowRun, Branch: "main", Event: "schedule"}) != "main schedule" ||
+		displayContext(Row{Kind: RowRun, SHA: "abcdef123"}) != "abcdef123" ||
+		displayContext(Row{Kind: RowError}) != "-" {
+		t.Fatal("displayContext formatting failed")
+	}
+	if rowContextKey(Row{Repo: "a/b", ContextKey: "pr:1"}) != "a/b\x00pr:1" ||
+		rowContextKey(Row{Repo: "a/b", Branch: "main", Event: "push"}) != "a/b\x00main direct push" {
+		t.Fatal("rowContextKey formatting failed")
 	}
 	if titleSHA(Row{Title: "title", SHA: "abcdef123"}) != "title" || titleSHA(Row{SHA: "abcdef123"}) != "abcdef1" || titleSHA(Row{SHA: "abc"}) != "abc" {
 		t.Fatal("titleSHA formatting failed")

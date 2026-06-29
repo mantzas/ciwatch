@@ -166,6 +166,11 @@ func TestFormatRow(t *testing.T) {
 	if got != want {
 		t.Fatalf("formatRow = %q, want %q", got, want)
 	}
+	got = formatRow(tui.Row{Repo: "a/b", Context: "PR #26 title", Workflow: "CI", Status: tui.StatusOK, Branch: "feature"})
+	want = "a/b\tPR #26 title\tCI\tOK\tfeature"
+	if got != want {
+		t.Fatalf("formatRow context = %q, want %q", got, want)
+	}
 	got = formatRow(tui.Row{Repo: "a/b", Workflow: "-", Status: tui.StatusError, Error: "boom"})
 	want = "a/b\t-\tERROR\tboom"
 	if got != want {

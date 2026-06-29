@@ -46,6 +46,12 @@ type Run struct {
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	RunStartedAt time.Time
+	PullRequests []PullRequest
+}
+
+type PullRequest struct {
+	Number int
+	URL    string
 }
 
 type RunsResult struct {
@@ -149,18 +155,30 @@ func (c *Client) WorkflowRuns(ctx context.Context, repo string, perPage int, eta
 			CreatedAt    time.Time `json:"created_at"`
 			UpdatedAt    time.Time `json:"updated_at"`
 			RunStartedAt time.Time `json:"run_started_at"`
+			PullRequests []struct {
+				Number  int    `json:"number"`
+				HTMLURL string `json:"html_url"`
+				URL     string `json:"url"`
+			} `json:"pull_requests"`
 		} `json:"workflow_runs"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return result, err
 	}
 	for _, raw := range payload.WorkflowRuns {
-		result.Runs = append(result.Runs, Run{
+		run := Run{
 			ID: raw.ID, Attempt: raw.RunAttempt, Name: raw.Name, Status: raw.Status,
 			Conclusion: raw.Conclusion, Branch: raw.HeadBranch, Event: raw.Event,
 			Title: raw.DisplayTitle, HeadSHA: raw.HeadSHA, URL: raw.HTMLURL,
 			CreatedAt: raw.CreatedAt, UpdatedAt: raw.UpdatedAt, RunStartedAt: raw.RunStartedAt,
-		})
+		}
+		for _, pr := range raw.PullRequests {
+			run.PullRequests = append(run.PullRequests, PullRequest{Number: pr.Number, URL: pr.HTMLURL})
+			if run.PullRequests[len(run.PullRequests)-1].URL == "" {
+				run.PullRequests[len(run.PullRequests)-1].URL = pr.URL
+			}
+		}
+		result.Runs = append(result.Runs, run)
 	}
 	return result, nil
 }
@@ -188,4 +206,8 @@ func readErrorMessage(r io.Reader) string {
 
 func RepoURL(repo string) string {
 	return (&url.URL{Scheme: "https", Host: "github.com", Path: "/" + repo}).String()
+}
+
+func PullRequestURL(repo string, number int) string {
+	return fmt.Sprintf("%s/pull/%d", RepoURL(repo), number)
 }

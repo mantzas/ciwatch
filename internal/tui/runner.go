@@ -119,12 +119,54 @@ func mapRuns(repo string, runs []ghapi.Run) []Row {
 		}
 		rows = append(rows, Row{
 			Kind: RowRun, Repo: repo, Workflow: run.Name, Status: Classify(run.Status, run.Conclusion),
+			Context: runContext(repo, run), ContextKey: runContextKey(run), ContextURL: runContextURL(repo, run),
 			Branch: run.Branch, Event: run.Event, Title: run.Title, SHA: run.HeadSHA, URL: run.URL,
 			UpdatedAt: run.UpdatedAt, StartedAt: run.RunStartedAt, FinishedAt: finished,
 			RunID: run.ID, Attempt: run.Attempt,
 		})
 	}
 	return rows
+}
+
+func runContext(repo string, run ghapi.Run) string {
+	if len(run.PullRequests) > 0 && run.PullRequests[0].Number > 0 {
+		label := fmt.Sprintf("PR #%d", run.PullRequests[0].Number)
+		if run.Title != "" {
+			label += " " + run.Title
+		}
+		return label
+	}
+	ref := run.Branch
+	if ref == "" {
+		ref = run.HeadSHA
+	}
+	if run.Event == "push" {
+		return ref + " direct push"
+	}
+	if run.Event != "" {
+		return ref + " " + run.Event
+	}
+	return ref
+}
+
+func runContextKey(run ghapi.Run) string {
+	if len(run.PullRequests) > 0 && run.PullRequests[0].Number > 0 {
+		return fmt.Sprintf("pr:%d", run.PullRequests[0].Number)
+	}
+	if run.Event == "push" {
+		return "push:" + run.Branch + ":" + run.HeadSHA
+	}
+	return run.Event + ":" + run.Branch + ":" + run.HeadSHA
+}
+
+func runContextURL(repo string, run ghapi.Run) string {
+	if len(run.PullRequests) == 0 || run.PullRequests[0].Number == 0 {
+		return ""
+	}
+	if run.PullRequests[0].URL != "" {
+		return run.PullRequests[0].URL
+	}
+	return ghapi.PullRequestURL(repo, run.PullRequests[0].Number)
 }
 
 func mergeRate(target *RateStatus, rate ghapi.Rate) {
