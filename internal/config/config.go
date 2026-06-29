@@ -16,7 +16,7 @@ import (
 var ErrNotFound = errors.New("config not found")
 
 const (
-	DefaultPollInterval = time.Minute
+	DefaultPollInterval = 15 * time.Second
 	DefaultRunsPerRepo  = 5
 	DefaultNotifyMacOS  = true
 	MinPollInterval     = 15 * time.Second
@@ -155,7 +155,7 @@ Sample config:
 
 repos = ["owner/repo"]
 
-# poll_interval = "60s"
+# poll_interval = "15s"
 # runs_per_repo = 5
 # notify_macos = true
 `)
