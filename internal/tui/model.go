@@ -36,6 +36,9 @@ const (
 type Row struct {
 	Kind       RowKind
 	Repo       string
+	Context    string
+	ContextKey string
+	ContextURL string
 	Workflow   string
 	Status     Status
 	Branch     string
@@ -103,9 +106,9 @@ type tickMsg time.Time
 
 func NewModel(cfg config.Config, runner Runner, notifier Notifier, cachePath string) Model {
 	cols := []table.Column{
-		{Title: "REPO", Width: 18}, {Title: "WORKFLOW", Width: 20}, {Title: "STATUS", Width: 12},
-		{Title: "REF", Width: 14}, {Title: "EVENT", Width: 10}, {Title: "AGE", Width: 8},
-		{Title: "DURATION", Width: 9}, {Title: "TITLE/SHA", Width: 28},
+		{Title: "REPO", Width: 18}, {Title: "CONTEXT", Width: 28}, {Title: "WORKFLOW", Width: 20},
+		{Title: "STATUS", Width: 12}, {Title: "REF", Width: 14}, {Title: "EVENT", Width: 10},
+		{Title: "AGE", Width: 8}, {Title: "DURATION", Width: 9}, {Title: "TITLE/SHA", Width: 28},
 	}
 	t := table.New(table.WithColumns(cols), table.WithFocused(true), table.WithHeight(12))
 	t.SetStyles(table.DefaultStyles())
@@ -219,15 +222,21 @@ func tick() tea.Cmd {
 
 func (m *Model) applyRows() {
 	rows := make([]table.Row, 0, len(m.rows))
-	groupRows := rowsByRepo(m.rows)
-	seenRows := map[string]int{}
+	repoRows := rowsByRepo(m.rows)
+	contextRows := rowsByContext(m.rows)
+	seenRepos := map[string]int{}
+	seenContexts := map[string]int{}
 	for _, row := range m.rows {
-		repo, workflow := threadCells(row, seenRows[row.Repo], groupRows[row.Repo])
+		repo := repoCell(row, seenRepos[row.Repo], repoRows[row.Repo])
+		contextKey := rowContextKey(row)
+		context := contextCell(row, seenContexts[contextKey])
+		workflow := workflowCell(row, seenContexts[contextKey], contextRows[contextKey])
 		rows = append(rows, table.Row{
-			repo, workflow, coloredStatusLabel(row.Status), displayRef(row), row.Event,
+			repo, context, workflow, coloredStatusLabel(row.Status), displayRef(row), row.Event,
 			age(row.UpdatedAt), duration(row.StartedAt, row.FinishedAt), titleSHA(row),
 		})
-		seenRows[row.Repo]++
+		seenRepos[row.Repo]++
+		seenContexts[contextKey]++
 	}
 	m.table.SetRows(rows)
 }
@@ -250,6 +259,9 @@ func (m *Model) openSelected() error {
 	if idx < 0 || idx >= len(m.rows) {
 		return nil
 	}
+	if m.rows[idx].ContextURL != "" {
+		return m.notifier.Open(m.rows[idx].ContextURL)
+	}
 	return m.notifier.Open(m.rows[idx].URL)
 }
 
@@ -269,13 +281,14 @@ func (m *Model) resizeColumns(width int) {
 	}
 	fixed := 18 + 12 + 10 + 8 + 9
 	remaining := max(20, width-fixed-10)
-	workflow := min(28, max(16, remaining/3))
+	context := min(34, max(18, remaining/3))
+	workflow := min(24, max(14, remaining/4))
 	ref := min(22, max(12, remaining/5))
-	title := max(16, remaining-workflow-ref)
+	title := max(16, remaining-context-workflow-ref)
 	m.table.SetColumns([]table.Column{
-		{Title: "REPO", Width: 18}, {Title: "WORKFLOW", Width: workflow}, {Title: "STATUS", Width: 12},
-		{Title: "REF", Width: ref}, {Title: "EVENT", Width: 10}, {Title: "AGE", Width: 8},
-		{Title: "DURATION", Width: 9}, {Title: "TITLE/SHA", Width: title},
+		{Title: "REPO", Width: 18}, {Title: "CONTEXT", Width: context}, {Title: "WORKFLOW", Width: workflow},
+		{Title: "STATUS", Width: 12}, {Title: "REF", Width: ref}, {Title: "EVENT", Width: 10},
+		{Title: "AGE", Width: 8}, {Title: "DURATION", Width: 9}, {Title: "TITLE/SHA", Width: title},
 	})
 }
 
@@ -287,17 +300,39 @@ func rowsByRepo(rows []Row) map[string]int {
 	return counts
 }
 
-func threadCells(row Row, idx, total int) (string, string) {
+func rowsByContext(rows []Row) map[string]int {
+	counts := map[string]int{}
+	for _, row := range rows {
+		counts[rowContextKey(row)]++
+	}
+	return counts
+}
+
+func repoCell(row Row, idx, _ int) string {
+	if idx == 0 {
+		return row.Repo
+	}
+	return ""
+}
+
+func contextCell(row Row, idx int) string {
+	if idx == 0 {
+		return displayContext(row)
+	}
+	return ""
+}
+
+func workflowCell(row Row, idx, total int) string {
 	if total <= 1 {
-		return row.Repo, row.Workflow
+		return row.Workflow
 	}
 	if idx == 0 {
-		return row.Repo, "┌ " + row.Workflow
+		return "┌ " + row.Workflow
 	}
 	if idx == total-1 {
-		return "", "└ " + row.Workflow
+		return "└ " + row.Workflow
 	}
-	return "", "├ " + row.Workflow
+	return "├ " + row.Workflow
 }
 
 func statusLabel(s Status) string {
@@ -348,13 +383,21 @@ func Classify(status, conclusion string) Status {
 }
 
 func SortRows(rows []Row) {
+	contexts := contextSorts(rows)
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
 		if rank(a.Kind) != rank(b.Kind) {
 			return rank(a.Kind) < rank(b.Kind)
 		}
-		if a.Kind == RowRun && !a.UpdatedAt.Equal(b.UpdatedAt) {
-			return a.UpdatedAt.After(b.UpdatedAt)
+		aContext, bContext := contexts[rowContextKey(a)], contexts[rowContextKey(b)]
+		if aContext.status != bContext.status {
+			return aContext.status < bContext.status
+		}
+		if !aContext.updated.Equal(bContext.updated) {
+			return aContext.updated.After(bContext.updated)
+		}
+		if aContext.key != bContext.key {
+			return aContext.key < bContext.key
 		}
 		if a.Repo != b.Repo {
 			return a.Repo < b.Repo
@@ -368,6 +411,7 @@ func SortRowsByRepoOrder(rows []Row, repos []string) {
 	for idx, repo := range repos {
 		order[NormalizeRepo(repo)] = idx
 	}
+	contexts := contextSorts(rows)
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
 		aRank, aKnown := order[NormalizeRepo(a.Repo)]
@@ -384,11 +428,56 @@ func SortRowsByRepoOrder(rows []Row, repos []string) {
 		if rank(a.Kind) != rank(b.Kind) {
 			return rank(a.Kind) < rank(b.Kind)
 		}
-		if a.Kind == RowRun && !a.UpdatedAt.Equal(b.UpdatedAt) {
-			return a.UpdatedAt.After(b.UpdatedAt)
+		aContext, bContext := contexts[rowContextKey(a)], contexts[rowContextKey(b)]
+		if aContext.status != bContext.status {
+			return aContext.status < bContext.status
+		}
+		if !aContext.updated.Equal(bContext.updated) {
+			return aContext.updated.After(bContext.updated)
+		}
+		if aContext.key != bContext.key {
+			return aContext.key < bContext.key
 		}
 		return a.Workflow < b.Workflow
 	})
+}
+
+type contextSort struct {
+	key     string
+	status  int
+	updated time.Time
+}
+
+func contextSorts(rows []Row) map[string]contextSort {
+	contexts := map[string]contextSort{}
+	for _, row := range rows {
+		key := rowContextKey(row)
+		current, ok := contexts[key]
+		next := contextSort{key: key, status: statusRank(row.Status), updated: row.UpdatedAt}
+		if !ok || next.status < current.status || next.updated.After(current.updated) {
+			if ok && next.status > current.status {
+				next.status = current.status
+			}
+			if ok && current.updated.After(next.updated) {
+				next.updated = current.updated
+			}
+			contexts[key] = next
+		}
+	}
+	return contexts
+}
+
+func statusRank(status Status) int {
+	switch status {
+	case StatusError, StatusBroken:
+		return 0
+	case StatusRunning:
+		return 1
+	case StatusNeutral:
+		return 2
+	default:
+		return 3
+	}
 }
 
 func rank(k RowKind) int {
@@ -407,6 +496,29 @@ func displayRef(row Row) string {
 		return row.Branch
 	}
 	return row.SHA
+}
+
+func displayContext(row Row) string {
+	if row.Context != "" {
+		return row.Context
+	}
+	if row.Kind == RowError || row.Kind == RowNoRuns {
+		return "-"
+	}
+	if row.Event == "push" {
+		return displayRef(row) + " direct push"
+	}
+	if row.Event != "" {
+		return displayRef(row) + " " + row.Event
+	}
+	return displayRef(row)
+}
+
+func rowContextKey(row Row) string {
+	if row.ContextKey != "" {
+		return row.Repo + "\x00" + row.ContextKey
+	}
+	return row.Repo + "\x00" + displayContext(row)
 }
 
 func titleSHA(row Row) string {

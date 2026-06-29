@@ -163,7 +163,11 @@ func runOnce(runner interface {
 }
 
 func formatRow(row tui.Row) string {
-	parts := []string{row.Repo, row.Workflow, string(row.Status)}
+	parts := []string{row.Repo}
+	if row.Context != "" {
+		parts = append(parts, row.Context)
+	}
+	parts = append(parts, row.Workflow, string(row.Status))
 	if row.Branch != "" {
 		parts = append(parts, row.Branch)
 	}

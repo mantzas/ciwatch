@@ -25,7 +25,7 @@ func TestWorkflowRunsSuccessETagAndRate(t *testing.T) {
 		w.Header().Set("X-RateLimit-Limit", "5000")
 		w.Header().Set("X-RateLimit-Remaining", "4999")
 		w.Header().Set("X-RateLimit-Reset", fmt.Sprint(reset))
-		_, _ = fmt.Fprint(w, `{"workflow_runs":[{"id":1,"run_attempt":2,"name":"CI","status":"completed","conclusion":"failure","head_branch":"main","head_sha":"abcdef123","event":"push","display_title":"fix","html_url":"https://github.com/a/b/actions/runs/1","created_at":"2026-06-28T10:00:00Z","updated_at":"2026-06-28T10:02:00Z","run_started_at":"2026-06-28T10:01:00Z"}]}`)
+		_, _ = fmt.Fprint(w, `{"workflow_runs":[{"id":1,"run_attempt":2,"name":"CI","status":"completed","conclusion":"failure","head_branch":"main","head_sha":"abcdef123","event":"pull_request","display_title":"fix","html_url":"https://github.com/a/b/actions/runs/1","created_at":"2026-06-28T10:00:00Z","updated_at":"2026-06-28T10:02:00Z","run_started_at":"2026-06-28T10:01:00Z","pull_requests":[{"number":12,"html_url":"https://github.com/a/b/pull/12"}]}]}`)
 	}))
 	defer srv.Close()
 	client := NewClient("token", srv.Client())
@@ -36,6 +36,9 @@ func TestWorkflowRunsSuccessETagAndRate(t *testing.T) {
 	}
 	if res.ETag != `"new"` || res.Rate.Limit != 5000 || len(res.Runs) != 1 || res.Runs[0].Attempt != 2 {
 		t.Fatalf("unexpected result: %+v", res)
+	}
+	if len(res.Runs[0].PullRequests) != 1 || res.Runs[0].PullRequests[0].Number != 12 || res.Runs[0].PullRequests[0].URL != "https://github.com/a/b/pull/12" {
+		t.Fatalf("pull request metadata not parsed: %+v", res.Runs[0].PullRequests)
 	}
 }
 
@@ -82,6 +85,9 @@ func TestClientDefaultsAPIErrorAndRepoURL(t *testing.T) {
 	}
 	if got := RepoURL("Owner/Repo With Space"); got != "https://github.com/Owner/Repo%20With%20Space" {
 		t.Fatalf("RepoURL = %q", got)
+	}
+	if got := PullRequestURL("Owner/Repo", 42); got != "https://github.com/Owner/Repo/pull/42" {
+		t.Fatalf("PullRequestURL = %q", got)
 	}
 }
 
