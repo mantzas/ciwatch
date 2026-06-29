@@ -31,7 +31,7 @@ Missing config prints the checked paths and a commented sample. Files are never 
 ```toml
 repos = ["owner/repo"]
 
-# poll_interval = "60s"
+# poll_interval = "15s"
 # runs_per_repo = 5
 # notify_macos = true
 ```
