@@ -107,11 +107,11 @@ type tickMsg time.Time
 func NewModel(cfg config.Config, runner Runner, notifier Notifier, cachePath string) Model {
 	cols := []table.Column{
 		{Title: "REPO", Width: 18}, {Title: "CONTEXT", Width: 28}, {Title: "WORKFLOW", Width: 20},
-		{Title: "STATUS", Width: 12}, {Title: "REF", Width: 14}, {Title: "EVENT", Width: 10},
-		{Title: "AGE", Width: 8}, {Title: "DURATION", Width: 9}, {Title: "TITLE/SHA", Width: 28},
+		{Title: "STATUS", Width: 12}, {Title: "REF", Width: 14},
+		{Title: "DURATION", Width: 9}, {Title: "TITLE/SHA", Width: 28},
 	}
 	t := table.New(table.WithColumns(cols), table.WithFocused(true), table.WithHeight(12))
-	t.SetStyles(table.DefaultStyles())
+	t.SetStyles(tableStyles())
 	return Model{cfg: cfg, runner: runner, notifier: notifier, cachePath: cachePath, table: t, next: time.Now()}
 }
 
@@ -171,27 +171,132 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	var b strings.Builder
-	header := fmt.Sprintf("ciwatch  repos:%d  rate:%s  next:%s", len(m.cfg.Repos), m.rateText(), until(m.next))
-	if m.rate.Warning {
-		header += "  RATE RISK"
-	}
-	if m.refreshing {
-		header += "  refreshing"
-	}
-	b.WriteString(lipgloss.NewStyle().Bold(true).Render(header))
+	b.WriteString(m.headerLine())
+	b.WriteString("\n")
+	b.WriteString(renderStatusSummary(statusSummaryForRows(m.rows)))
 	b.WriteString("\n")
 	if m.err != "" {
-		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(m.err))
+		b.WriteString(errorStyle().Render(m.err))
 		b.WriteString("\n")
 	}
-	b.WriteString(m.table.View())
+	b.WriteString(m.renderTable())
 	b.WriteString("\n")
 	if len(m.events) > 0 {
-		b.WriteString(strings.Join(m.events[max(0, len(m.events)-3):], "\n"))
+		for _, event := range m.events[max(0, len(m.events)-3):] {
+			b.WriteString(styledEvent(event))
+			b.WriteString("\n")
+		}
+	} else {
 		b.WriteString("\n")
 	}
-	b.WriteString("↑/↓ jk navigate  r refresh  o open  q quit")
+	b.WriteString(helpStyle().Render("↑/↓ jk navigate  r refresh  o open  q quit"))
 	return b.String()
+}
+
+func (m Model) headerLine() string {
+	parts := []string{
+		titleStyle().Render("ciwatch"),
+		fmt.Sprintf("repos:%d", len(m.cfg.Repos)),
+		fmt.Sprintf("rate:%s", m.rateText()),
+		fmt.Sprintf("next:%s", until(m.next)),
+	}
+	if m.rate.Warning {
+		parts = append(parts, warningStyle().Render("RATE RISK"))
+	}
+	if m.refreshing {
+		parts = append(parts, activeStyle().Render("refreshing"))
+	}
+	return strings.Join(parts, "  ")
+}
+
+func (m Model) renderTable() string {
+	columns := m.table.Columns()
+	rows := m.table.Rows()
+	var b strings.Builder
+	b.WriteString(renderTableHeader(columns))
+	b.WriteString("\n")
+	b.WriteString(strings.Repeat("─", tableWidth(columns)))
+
+	height := max(1, m.table.Height())
+	start := 0
+	cursor := m.table.Cursor()
+	if cursor >= height {
+		start = cursor - height + 1
+	}
+	end := min(len(rows), start+height)
+	for idx := start; idx < end; idx++ {
+		b.WriteString("\n")
+		line := renderTableRow(columns, rows[idx])
+		if idx == cursor {
+			line = selectedRowStyle().Render(fitCell(line, tableWidth(columns)))
+		}
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+func renderTableHeader(columns []table.Column) string {
+	cells := make([]string, 0, len(columns))
+	for _, col := range columns {
+		cells = append(cells, headerCellStyle().Render(fitCell(col.Title, col.Width)))
+	}
+	return strings.Join(cells, "  ")
+}
+
+func renderTableRow(columns []table.Column, row table.Row) string {
+	cells := make([]string, 0, len(columns))
+	for idx, col := range columns {
+		value := ""
+		if idx < len(row) {
+			value = row[idx]
+		}
+		cell := fitCell(value, col.Width)
+		if col.Title == "STATUS" {
+			cell = statusStyle(value).Render(cell)
+		}
+		cells = append(cells, cell)
+	}
+	return strings.Join(cells, "  ")
+}
+
+func tableWidth(columns []table.Column) int {
+	width := 0
+	for idx, col := range columns {
+		width += col.Width
+		if idx > 0 {
+			width += 2
+		}
+	}
+	return width
+}
+
+func fitCell(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	value = truncateCell(value, width)
+	if pad := width - lipgloss.Width(value); pad > 0 {
+		value += strings.Repeat(" ", pad)
+	}
+	return value
+}
+
+func truncateCell(value string, width int) string {
+	if lipgloss.Width(value) <= width {
+		return value
+	}
+	if width == 1 {
+		return "…"
+	}
+	var b strings.Builder
+	for _, r := range value {
+		next := b.String() + string(r)
+		if lipgloss.Width(next) > width-1 {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String() + "…"
 }
 
 func (m Model) SaveState() error {
@@ -232,8 +337,8 @@ func (m *Model) applyRows() {
 		context := contextCell(row, seenContexts[contextKey])
 		workflow := workflowCell(row, seenContexts[contextKey], contextRows[contextKey])
 		rows = append(rows, table.Row{
-			repo, context, workflow, coloredStatusLabel(row.Status), displayRef(row), row.Event,
-			age(row.UpdatedAt), duration(row.StartedAt, row.FinishedAt), titleSHA(row),
+			repo, context, workflow, statusLabel(row.Status), displayRef(row),
+			duration(row.StartedAt, row.FinishedAt), titleSHA(row, context),
 		})
 		seenRepos[row.Repo]++
 		seenContexts[contextKey]++
@@ -279,16 +384,16 @@ func (m *Model) resizeColumns(width int) {
 	if width <= 0 {
 		return
 	}
-	fixed := 18 + 12 + 10 + 8 + 9
+	fixed := 18 + 12 + 9
 	remaining := max(20, width-fixed-10)
 	context := min(34, max(18, remaining/3))
-	workflow := min(24, max(14, remaining/4))
+	workflow := min(32, max(16, remaining/4))
 	ref := min(22, max(12, remaining/5))
 	title := max(16, remaining-context-workflow-ref)
 	m.table.SetColumns([]table.Column{
 		{Title: "REPO", Width: 18}, {Title: "CONTEXT", Width: context}, {Title: "WORKFLOW", Width: workflow},
-		{Title: "STATUS", Width: 12}, {Title: "REF", Width: ref}, {Title: "EVENT", Width: 10},
-		{Title: "AGE", Width: 8}, {Title: "DURATION", Width: 9}, {Title: "TITLE/SHA", Width: title},
+		{Title: "STATUS", Width: 12}, {Title: "REF", Width: ref},
+		{Title: "DURATION", Width: 9}, {Title: "TITLE/SHA", Width: title},
 	})
 }
 
@@ -335,6 +440,48 @@ func workflowCell(row Row, idx, total int) string {
 	return "├ " + row.Workflow
 }
 
+type statusSummary struct {
+	Broken  int
+	Running int
+	OK      int
+	Quiet   int
+	Errors  int
+}
+
+func statusSummaryForRows(rows []Row) statusSummary {
+	var summary statusSummary
+	for _, row := range rows {
+		switch row.Status {
+		case StatusBroken:
+			summary.Broken++
+		case StatusRunning:
+			summary.Running++
+		case StatusOK:
+			summary.OK++
+		case StatusError:
+			summary.Errors++
+		default:
+			summary.Quiet++
+		}
+	}
+	return summary
+}
+
+func renderStatusSummary(summary statusSummary) string {
+	parts := []string{
+		summaryBadge("BROKEN", summary.Broken, errorStyle()),
+		summaryBadge("RUNNING", summary.Running, activeStyle()),
+		summaryBadge("OK", summary.OK, successStyle()),
+		summaryBadge("QUIET", summary.Quiet, quietStyle()),
+		summaryBadge("ERRORS", summary.Errors, errorStyle()),
+	}
+	return strings.Join(parts, "  ")
+}
+
+func summaryBadge(label string, count int, style lipgloss.Style) string {
+	return style.Bold(true).Render(fmt.Sprintf("%s %d", label, count))
+}
+
 func statusLabel(s Status) string {
 	switch s {
 	case StatusBroken:
@@ -344,26 +491,94 @@ func statusLabel(s Status) string {
 	case StatusOK:
 		return "✓ OK"
 	case StatusNeutral:
-		return "• NEUTRAL"
+		return "• QUIET"
 	default:
 		return "! ERROR"
 	}
 }
 
-func coloredStatusLabel(s Status) string {
-	label := statusLabel(s)
-	switch s {
-	case StatusBroken, StatusError:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true).Render(label)
-	case StatusRunning:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Render(label)
-	case StatusOK:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Render(label)
-	case StatusNeutral:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(label)
+func tableStyles() table.Styles {
+	styles := table.DefaultStyles()
+	styles.Header = styles.Header.
+		Bold(true).
+		Foreground(lipgloss.Color("14")).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderBottom(true).
+		BorderForeground(lipgloss.Color("8"))
+	styles.Cell = styles.Cell.Foreground(lipgloss.Color("252"))
+	styles.Selected = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("14")).
+		Background(lipgloss.Color("236")).
+		Padding(0, 1)
+	return styles
+}
+
+func headerCellStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
+}
+
+func selectedRowStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("15"))
+}
+
+func statusStyle(label string) lipgloss.Style {
+	switch {
+	case strings.Contains(label, "BROKEN"), strings.Contains(label, "ERROR"):
+		return errorStyle().Bold(true)
+	case strings.Contains(label, "RUNNING"):
+		return activeStyle()
+	case strings.Contains(label, "OK"):
+		return successStyle()
 	default:
-		return label
+		return quietStyle()
 	}
+}
+
+func titleStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
+}
+
+func errorStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+}
+
+func activeStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+}
+
+func successStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+}
+
+func quietStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+}
+
+func warningStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
+}
+
+func helpStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+}
+
+func styledEvent(event string) string {
+	if urgentEvent(event) {
+		return errorStyle().Render(event)
+	}
+	if strings.Contains(strings.ToLower(event), "refresh") {
+		return activeStyle().Render(event)
+	}
+	return helpStyle().Render(event)
+}
+
+func urgentEvent(event string) bool {
+	event = strings.ToLower(event)
+	return strings.Contains(event, "broken") ||
+		strings.Contains(event, "failed") ||
+		strings.Contains(event, "error") ||
+		strings.Contains(event, "risk")
 }
 
 func Classify(status, conclusion string) Status {
@@ -521,8 +736,11 @@ func rowContextKey(row Row) string {
 	return row.Repo + "\x00" + displayContext(row)
 }
 
-func titleSHA(row Row) string {
+func titleSHA(row Row, context string) string {
 	if row.Title != "" {
+		if context != "" && strings.Contains(context, row.Title) {
+			return ""
+		}
 		return row.Title
 	}
 	if len(row.SHA) >= 7 {
