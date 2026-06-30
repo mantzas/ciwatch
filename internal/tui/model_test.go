@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/mantzas/ciwatch/internal/config"
 	ghapi "github.com/mantzas/ciwatch/internal/github"
 	"github.com/mantzas/ciwatch/internal/notify"
@@ -351,7 +352,7 @@ func TestModelViewSaveRefreshAndResize(t *testing.T) {
 	model.applyRows()
 
 	view := model.View()
-	for _, want := range []string{"repos:2", "RATE RISK", "refreshing", "last refresh failed", "broken: a/b CI main"} {
+	for _, want := range []string{"repos:2", "BROKEN 0", "RUNNING 0", "OK 1", "QUIET 0", "ERRORS 0", "RATE RISK", "refreshing", "last refresh failed", "broken: a/b CI main", "↑/↓ jk navigate  r refresh  o open  q quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q:\n%s", want, view)
 		}
@@ -365,8 +366,33 @@ func TestModelViewSaveRefreshAndResize(t *testing.T) {
 
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 96, Height: 18})
 	got := updated.(Model)
-	if got.width != 96 || got.height != 18 || len(got.table.Columns()) != 9 {
+	if got.width != 96 || got.height != 18 || len(got.table.Columns()) != 7 {
 		t.Fatalf("resize not applied: width=%d height=%d cols=%d", got.width, got.height, len(got.table.Columns()))
+	}
+}
+
+func TestRenderTableUsesStableVisibleWidths(t *testing.T) {
+	model := NewModel(config.Config{}, &fakeRunner{cache: state.New()}, &fakeNotifier{}, "state.json")
+	model.rows = []Row{
+		{Kind: RowRun, Repo: "a/b", Context: "short", Workflow: "CI", Status: StatusOK, Branch: "main", Event: "push", Title: "ok"},
+		{Kind: RowRun, Repo: "a/b", Context: "long context value that should truncate", Workflow: "very long workflow name", Status: StatusBroken, Branch: "feature/very-long-branch-name", Event: "pull_request", Title: "long title"},
+		{Kind: RowNoRuns, Repo: "empty/repo", Workflow: "-", Status: StatusNeutral, Title: "no workflow runs"},
+	}
+	model.applyRows()
+	model.table.SetHeight(5)
+
+	lines := strings.Split(model.renderTable(), "\n")
+	if len(lines) < 4 {
+		t.Fatalf("rendered table too short: %q", model.renderTable())
+	}
+	wantWidth := lipgloss.Width(lines[0])
+	for idx, line := range lines {
+		if got := lipgloss.Width(line); got != wantWidth {
+			t.Fatalf("line %d width = %d, want %d:\n%s", idx, got, wantWidth, model.renderTable())
+		}
+	}
+	if !strings.Contains(model.renderTable(), "✖ BROKEN") || !strings.Contains(model.renderTable(), "• QUIET") {
+		t.Fatalf("status labels missing:\n%s", model.renderTable())
 	}
 }
 
@@ -436,7 +462,7 @@ func TestFormattingHelpers(t *testing.T) {
 		StatusBroken:  "✖ BROKEN",
 		StatusRunning: "… RUNNING",
 		StatusOK:      "✓ OK",
-		StatusNeutral: "• NEUTRAL",
+		StatusNeutral: "• QUIET",
 		StatusError:   "! ERROR",
 	}
 	for status, want := range tests {
@@ -458,7 +484,10 @@ func TestFormattingHelpers(t *testing.T) {
 		rowContextKey(Row{Repo: "a/b", Branch: "main", Event: "push"}) != "a/b\x00main direct push" {
 		t.Fatal("rowContextKey formatting failed")
 	}
-	if titleSHA(Row{Title: "title", SHA: "abcdef123"}) != "title" || titleSHA(Row{SHA: "abcdef123"}) != "abcdef1" || titleSHA(Row{SHA: "abc"}) != "abc" {
+	if titleSHA(Row{Title: "title", SHA: "abcdef123"}, "") != "title" ||
+		titleSHA(Row{Title: "title", SHA: "abcdef123"}, "PR #1 title") != "" ||
+		titleSHA(Row{SHA: "abcdef123"}, "") != "abcdef1" ||
+		titleSHA(Row{SHA: "abc"}, "") != "abc" {
 		t.Fatal("titleSHA formatting failed")
 	}
 	if age(time.Time{}) != "-" || duration(time.Time{}, now) != "-" || until(time.Time{}) != "-" {
@@ -480,6 +509,54 @@ func TestFormattingHelpers(t *testing.T) {
 	}
 	if NormalizeRepo("Owner/Repo") != "owner/repo" {
 		t.Fatal("NormalizeRepo did not lowercase")
+	}
+}
+
+func TestStatusSummaryHelpers(t *testing.T) {
+	rows := []Row{
+		{Kind: RowRun, Status: StatusBroken},
+		{Kind: RowRun, Status: StatusRunning},
+		{Kind: RowRun, Status: StatusOK},
+		{Kind: RowNoRuns, Status: StatusNeutral},
+		{Kind: RowError, Status: StatusError},
+	}
+	summary := statusSummaryForRows(rows)
+	if summary.Broken != 1 || summary.Running != 1 || summary.OK != 1 || summary.Quiet != 1 || summary.Errors != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	rendered := renderStatusSummary(summary)
+	for _, want := range []string{"BROKEN 1", "RUNNING 1", "OK 1", "QUIET 1", "ERRORS 1"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("summary missing %q: %q", want, rendered)
+		}
+	}
+
+	empty := renderStatusSummary(statusSummaryForRows(nil))
+	for _, want := range []string{"BROKEN 0", "RUNNING 0", "OK 0", "QUIET 0", "ERRORS 0"} {
+		if !strings.Contains(empty, want) {
+			t.Fatalf("empty summary missing %q: %q", want, empty)
+		}
+	}
+}
+
+func TestFitCellTruncatesAndPadsByVisibleWidth(t *testing.T) {
+	if got := fitCell("abcdef", 4); got != "abc…" {
+		t.Fatalf("truncated cell = %q", got)
+	}
+	if got := fitCell("ok", 4); got != "ok  " {
+		t.Fatalf("padded cell = %q", got)
+	}
+	if lipgloss.Width(fitCell("✓ OK", 6)) != 6 {
+		t.Fatalf("unicode cell width was not stable: %q", fitCell("✓ OK", 6))
+	}
+}
+
+func TestEventStylingClassifiesUrgentEvents(t *testing.T) {
+	if !urgentEvent("12:00 broken: a/b CI main") || !urgentEvent("12:01 macOS notification failed: blocked") {
+		t.Fatal("urgent events were not classified")
+	}
+	if urgentEvent("12:02 refresh complete") {
+		t.Fatal("non-urgent refresh event was classified as urgent")
 	}
 }
 
