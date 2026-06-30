@@ -30,3 +30,13 @@ jobs:
         with:
           version: v2.5.0
           args: --timeout=5m
+
+  openspec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - run: npm install -g @fission-ai/openspec@1.5.0
+      - run: openspec validate --all
